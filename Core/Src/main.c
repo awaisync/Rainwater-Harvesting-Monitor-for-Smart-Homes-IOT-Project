@@ -37,6 +37,10 @@ I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart1;   // USART1 -> Wio-E5
 UART_HandleTypeDef huart2;   // USART2 -> PC (ST-LINK)
 
+volatile uint8_t btn_ble_trigger = 0; //flag for ext interrupt for BLE Uplink
+
+
+
 uint8_t sht40_data[6];
 uint8_t lora_rx[64];
 
@@ -70,6 +74,16 @@ PUTCHAR_PROTOTYPE
 {
     HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, 100);
     return ch;
+}
+
+
+// call back fucntion for external interrupt
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_0)   // PB0
+    {
+        btn_ble_trigger = 1;      // just set flag, no heavy work here
+    }
 }
 
 
@@ -290,8 +304,6 @@ int main(void)
   int joined_ok = 0;
   uint32_t last_join_attempt = 0;
 
-  uint32_t last_ble_send = 0; /// to send BLE/I²C data every 30 seconds, not every 5-second sensor cycle.
-
   float temp, hum;
 
   while (1)
@@ -311,7 +323,7 @@ int main(void)
               if (joined_ok)
                   printf("JOIN SUCCESS, will start sending data.\r\n");
               else
-                  printf("JOIN FAILED (no downlink). Will retry.\r\n");
+                  printf("JOIN FAILED (no downlink). Will retry after 90s.\r\n");
           }
 
           // Even if not joined, we can still read sensor just for debug
@@ -321,12 +333,23 @@ int main(void)
               printf("T = %.2f  H = %.2f  Dist = %.1f cm (not joined)\r\n",
                      temp, hum, dist);
 
-              uint32_t now = HAL_GetTick();
-              if (now - last_ble_send >= 30000 || last_ble_send == 0)
+              // after you have valid temp, hum, dist:
+              if (btn_ble_trigger)
               {
-                  BLE_I2C_Send(temp, hum, dist);  // send to XIAO over I2C
-                  last_ble_send = now;
+                  btn_ble_trigger = 0;  // clear flag
+
+                  // optional: debounce simple guard
+                  static uint32_t last_btn_time = 0;
+                  uint32_t now_btn = HAL_GetTick();
+                  if (now_btn - last_btn_time > 200)   // 200 ms debounce
+                  {
+                      last_btn_time = now_btn;
+
+                      BLE_I2C_Send(temp, hum, dist);   // send current values via I2C to XIAO
+                      printf("Button Pressed, Send BLE DATA 0\r\n");
+                  }
               }
+
           }
 
 
@@ -343,12 +366,23 @@ int main(void)
     	      printf("T = %.2f  H = %.2f  Dist = %.1f cm\r\n", temp, hum, dist);
 
     	      // --- send to XIAO every 30 s ---
-    	      uint32_t now = HAL_GetTick();
-    	      if (now - last_ble_send >= 30000 || last_ble_send == 0)
+    	      // after you have valid temp, hum, dist:
+    	      if (btn_ble_trigger)
     	      {
-    	          BLE_I2C_Send(temp, hum, dist);
-    	          last_ble_send = now;
+    	          btn_ble_trigger = 0;  // clear flag
+
+    	          // optional: debounce simple guard
+    	          static uint32_t last_btn_time = 0;
+    	          uint32_t now_btn = HAL_GetTick();
+    	          if (now_btn - last_btn_time > 200)   // 200 ms debounce
+    	          {
+    	              last_btn_time = now_btn;
+
+    	              BLE_I2C_Send(temp, hum, dist);   // send current values via I2C to XIAO
+    	              printf("Button: forced BLE send\r\n");
+    	          }
     	      }
+
 
     	      // --- your existing LoRa packing & AT+MSGHEX ---
     	      int16_t t_int = (int16_t)(temp * 100);
@@ -463,7 +497,7 @@ static void MX_GPIO_Init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitTypeDef GPIO_InitStruct = {0};     //PB0 Configuration
 
     // LD3
     HAL_GPIO_WritePin(LD3_GPIO_Port, LD3_Pin, GPIO_PIN_RESET);
@@ -485,6 +519,19 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    //PB0 Configuration
+    // Button PB0: input with pull-up + EXTI on falling edge
+      GPIO_InitStruct.Pin  = GPIO_PIN_0;
+      GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+      GPIO_InitStruct.Pull = GPIO_PULLUP;
+      HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+      // Enable EXTI0 interrupt in NVIC
+      HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+      HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+
 }
 
 
