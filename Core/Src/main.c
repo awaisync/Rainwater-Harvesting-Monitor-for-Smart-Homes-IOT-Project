@@ -13,12 +13,23 @@
 
 /* Private define ------------------------------------------------------------*/
 #define SHT40_ADDR (0x44 << 1) // HAL expects 8-bit address
+
+#define XIAO_I2C_ADDR (0x28 << 1)   // 7-bit 0x28 -> 8-bit for HAL
+
+
+
+
 // HC-SR04 pins
 #define HCSR04_TRIG_PORT GPIOA
 #define HCSR04_TRIG_PIN  GPIO_PIN_4   // PA4 -> Trigger
 
 #define HCSR04_ECHO_PORT GPIOA
 #define HCSR04_ECHO_PIN  GPIO_PIN_7   // PA7 -> Echo
+
+
+
+
+
 
 
 /* Private variables ---------------------------------------------------------*/
@@ -60,6 +71,43 @@ PUTCHAR_PROTOTYPE
     HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, 100);
     return ch;
 }
+
+
+//BLE function sir jeee
+
+void BLE_I2C_Send(float temp, float hum, float dist_cm)
+{
+    // Scale and clamp to int16
+    int16_t t_x100 = (int16_t)(temp * 100.0f);    // °C * 100
+    int16_t h_x100 = (int16_t)(hum  * 100.0f);    // %RH * 100
+    int16_t d_x10  = (int16_t)(dist_cm * 10.0f);  // cm * 10
+
+    uint8_t buf[7];
+    buf[0] = 0x55;                 // header
+    buf[1] = (t_x100 >> 8) & 0xFF; // T high byte (big-endian)
+    buf[2] =  t_x100       & 0xFF; // T low byte
+    buf[3] = (h_x100 >> 8) & 0xFF; // H high
+    buf[4] =  h_x100       & 0xFF; // H low
+    buf[5] = (d_x10  >> 8) & 0xFF; // D high
+    buf[6] =  d_x10        & 0xFF; // D low
+
+    HAL_StatusTypeDef st = HAL_I2C_Master_Transmit(
+                               &hi2c1,
+                               XIAO_I2C_ADDR,
+                               buf,
+                               sizeof(buf),
+                               100   // timeout ms
+                           );
+
+    if (st == HAL_OK) {
+        printf("BLE_I2C_Send OK: T=%.2f H=%.2f D=%.1f\r\n",
+               temp, hum, dist_cm);
+    } else {
+        printf("BLE_I2C_Send FAILED (status=%d)\r\n", st);
+    }
+}
+
+
 
 // SHT40 read function
 int SHT40_Read(float *temperature, float *humidity)
@@ -242,6 +290,8 @@ int main(void)
   int joined_ok = 0;
   uint32_t last_join_attempt = 0;
 
+  uint32_t last_ble_send = 0; /// to send BLE/I²C data every 30 seconds, not every 5-second sensor cycle.
+
   float temp, hum;
 
   while (1)
@@ -264,13 +314,21 @@ int main(void)
                   printf("JOIN FAILED (no downlink). Will retry.\r\n");
           }
 
-          // Even if not joined, you can still read sensor just for debug
+          // Even if not joined, we can still read sensor just for debug
           if (SHT40_Read(&temp, &hum) == HAL_OK)
           {
               float dist = HCSR04_ReadDistance_cm();
               printf("T = %.2f  H = %.2f  Dist = %.1f cm (not joined)\r\n",
                      temp, hum, dist);
+
+              uint32_t now = HAL_GetTick();
+              if (now - last_ble_send >= 30000 || last_ble_send == 0)
+              {
+                  BLE_I2C_Send(temp, hum, dist);  // send to XIAO over I2C
+                  last_ble_send = now;
+              }
           }
+
 
 
           HAL_Delay(5000);  // sensor interval
@@ -278,27 +336,39 @@ int main(void)
       }
 
       // --- WE ARE JOINED: send data every 5 s ---
-      if (SHT40_Read(&temp, &hum) == HAL_OK)
-      {
-          printf("T = %.2f  H = %.2f\r\n", temp, hum);
 
-          int16_t t_int = (int16_t)(temp * 100);
-          int16_t h_int = (int16_t)(hum  * 100);
+    	  if (SHT40_Read(&temp, &hum) == HAL_OK)
+    	  {
+    	      float dist = HCSR04_ReadDistance_cm();
+    	      printf("T = %.2f  H = %.2f  Dist = %.1f cm\r\n", temp, hum, dist);
 
-          uint8_t p[4];
-          p[0] = t_int >> 8;
-          p[1] = t_int & 0xFF;
-          p[2] = h_int >> 8;
-          p[3] = h_int & 0xFF;
+    	      // --- send to XIAO every 30 s ---
+    	      uint32_t now = HAL_GetTick();
+    	      if (now - last_ble_send >= 30000 || last_ble_send == 0)
+    	      {
+    	          BLE_I2C_Send(temp, hum, dist);
+    	          last_ble_send = now;
+    	      }
 
-          char cmd[64];
-          sprintf(cmd, "AT+MSGHEX=%02X%02X%02X%02X\r\n",
-                  p[0], p[1], p[2], p[3]);
+    	      // --- your existing LoRa packing & AT+MSGHEX ---
+    	      int16_t t_int = (int16_t)(temp * 100);
+    	      int16_t h_int = (int16_t)(hum  * 100);
 
-          printf("Sending LoRa: %s\r\n", cmd);
-          LoRa_Send(cmd);
-          LoRa_ReadReply();   // should show +MSG: Done
-      }
+    	      uint8_t p[4];
+    	      p[0] = t_int >> 8;
+    	      p[1] = t_int & 0xFF;
+    	      p[2] = h_int >> 8;
+    	      p[3] = h_int & 0xFF;
+
+    	      char cmd[64];
+    	      sprintf(cmd, "AT+MSGHEX=%02X%02X%02X%02X\r\n",
+    	              p[0], p[1], p[2], p[3]);
+
+    	      printf("Sending LoRa: %s\r\n", cmd);
+    	      LoRa_Send(cmd);
+    	      LoRa_ReadReply();
+    	  }
+
       else
       {
           printf("SHT40 read error!\r\n");
