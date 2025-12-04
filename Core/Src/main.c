@@ -165,6 +165,42 @@ void LoRa_ReadReply(void)
 
 
 // Read reply from Wio-E5 (blocking, very simple)
+//int LoRa_ReadReply_Long(void)
+//{
+//    memset(lora_rx, 0, sizeof(lora_rx));
+//
+//    uint32_t start = HAL_GetTick();
+//    uint16_t idx = 0;
+//    uint8_t ch;
+//
+//    while ((HAL_GetTick() - start) < 10000)  // 10 s window
+//    {
+//        if (HAL_UART_Receive(&huart1, &ch, 1, 500) == HAL_OK)
+//        {
+//            if (idx < sizeof(lora_rx) - 1)
+//                lora_rx[idx++] = ch;
+//        }
+//        else
+//        {
+//            // 500 ms no data -> probably end of message
+//            break;
+//        }
+//    }
+//
+//    lora_rx[idx] = 0;
+//    printf("LoRa long reply:\r\n%s\r\n", lora_rx);
+//
+//    // crude check: if reply contains "joined", treat as success
+//    if (strstr((char*)lora_rx, "joined") != NULL ||
+//        strstr((char*)lora_rx, "Join Succeeded") != NULL)
+//    {
+//        return 1;
+//    }
+//    return 0;
+//}
+
+
+
 int LoRa_ReadReply_Long(void)
 {
     memset(lora_rx, 0, sizeof(lora_rx));
@@ -173,31 +209,36 @@ int LoRa_ReadReply_Long(void)
     uint16_t idx = 0;
     uint8_t ch;
 
-    while ((HAL_GetTick() - start) < 10000)  // 10 s window
+    while ((HAL_GetTick() - start) < 15000)  // 15 s overall window
     {
-        if (HAL_UART_Receive(&huart1, &ch, 1, 500) == HAL_OK)
+        // short per-byte timeout, but DON'T break on timeout
+        if (HAL_UART_Receive(&huart1, &ch, 1, 50) == HAL_OK)
         {
             if (idx < sizeof(lora_rx) - 1)
+            {
                 lora_rx[idx++] = ch;
+            }
+
+            // optional live echo to PC for debug
+            HAL_UART_Transmit(&huart2, &ch, 1, 10);
         }
-        else
-        {
-            // 500 ms no data -> probably end of message
-            break;
-        }
+        // else: timeout, no byte in last 50 ms -> just loop again
     }
 
     lora_rx[idx] = 0;
-    printf("LoRa long reply:\r\n%s\r\n", lora_rx);
 
-    // crude check: if reply contains "joined", treat as success
+    printf("\r\n[LoRa long reply buffer]\r\n%s\r\n", lora_rx);
+
+    // check for success keywords
     if (strstr((char*)lora_rx, "joined") != NULL ||
-        strstr((char*)lora_rx, "Join Succeeded") != NULL)
+        strstr((char*)lora_rx, "Join Succeeded") != NULL ||
+        strstr((char*)lora_rx, "Done") != NULL)
     {
         return 1;
     }
     return 0;
 }
+
 
 //ultrassonic sensor reads
 // --- DWT-based microsecond timing for HC-SR04 ---
@@ -354,7 +395,7 @@ int main(void)
 
 
 
-          HAL_Delay(5000);  // sensor interval
+          HAL_Delay(10000);  // sensor interval
           continue;   // skip sending AT+MSGHEX until joined
       }
 
@@ -387,20 +428,25 @@ int main(void)
     	      // --- your existing LoRa packing & AT+MSGHEX ---
     	      int16_t t_int = (int16_t)(temp * 100);
     	      int16_t h_int = (int16_t)(hum  * 100);
+    	      int16_t d_int = (int16_t)(dist * 10);
 
-    	      uint8_t p[4];
+    	      uint8_t p[6];
     	      p[0] = t_int >> 8;
     	      p[1] = t_int & 0xFF;
     	      p[2] = h_int >> 8;
     	      p[3] = h_int & 0xFF;
+    	      p[4] = d_int >> 8;
+    	      p[5] = d_int & 0xFF;
 
-    	      char cmd[64];
-    	      sprintf(cmd, "AT+MSGHEX=%02X%02X%02X%02X\r\n",
-    	              p[0], p[1], p[2], p[3]);
+    	      char cmd[64];   // <--- THIS FIXES THE ERROR
+
+    	      sprintf(cmd, "AT+MSGHEX=%02X%02X%02X%02X%02X%02X\r\n",
+    	              p[0], p[1], p[2], p[3], p[4], p[5]);
 
     	      printf("Sending LoRa: %s\r\n", cmd);
     	      LoRa_Send(cmd);
     	      LoRa_ReadReply();
+
     	  }
 
       else
@@ -408,7 +454,7 @@ int main(void)
           printf("SHT40 read error!\r\n");
       }
 
-      HAL_Delay(5000); // 5 s between uplinks (for testing)
+    	   HAL_Delay(15000); // 15 s between uplinks (for testing)
   }
 }
 
